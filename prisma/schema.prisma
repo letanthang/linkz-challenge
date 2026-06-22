@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int           @id @default(autoincrement())
+  email        String        @unique
+  passwordHash String        @map("password_hash")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  reservations Reservation[]
+
+  @@map("users")
+}
+
+model Seat {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique
+  status       SeatStatus    @default(AVAILABLE)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  reservations Reservation[]
+
+  @@map("seats")
+}
+
+model Reservation {
+  id                  Int               @id @default(autoincrement())
+  userId              Int               @map("user_id")
+  seatId              Int               @map("seat_id")
+  status              ReservationStatus @default(PENDING_PAYMENT)
+  paymentAttemptCount Int               @default(0) @map("payment_attempt_count")
+  expiresAt           DateTime          @map("expires_at")
+  createdAt           DateTime          @default(now()) @map("created_at")
+  updatedAt           DateTime          @updatedAt @map("updated_at")
+  user                User              @relation(fields: [userId], references: [id])
+  seat                Seat              @relation(fields: [seatId], references: [id])
+  payments            Payment[]
+
+  @@map("reservations")
+}
+
+model Payment {
+  id             Int           @id @default(autoincrement())
+  reservationId  Int           @map("reservation_id")
+  idempotencyKey String        @unique @map("idempotency_key")
+  attemptNumber  Int           @map("attempt_number")
+  status         PaymentStatus @default(PENDING)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  reservation    Reservation   @relation(fields: [reservationId], references: [id])
+
+  @@map("payments")
+}
+
+enum SeatStatus {
+  AVAILABLE
+  RESERVED
+}
+
+enum ReservationStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}

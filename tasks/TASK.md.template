@@ -1,0 +1,22 @@
+# Task: [Task Name]
+
+## Context
+<!-- What problem are we solving? -->
+
+## Acceptance Criteria
+<!-- These become your tests -->
+- [ ] ...
+- [ ] ...
+
+## Out of Scope
+<!-- Prevent Claude from over-engineering -->
+- ...
+
+## Success Verification
+```bash
+go build ./...
+go test ./...
+```
+
+## Notes
+<!-- Edge cases, constraints, decisions -->

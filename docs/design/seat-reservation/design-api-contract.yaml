@@ -1,0 +1,571 @@
+openapi: 3.0.3
+info:
+  title: Seat Reservation API
+  version: 1.0.0
+  description: |
+    Public seat reservation platform API.
+    All state-mutating endpoints require authentication via HttpOnly JWT cookie
+    set by POST /api/auth/login.
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:3000/api
+    description: Local development
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+# Authentication is carried in an HttpOnly cookie named `token`.
+# The cookie is set by POST /api/auth/login and cleared by POST /api/auth/logout.
+# No Authorization header is used — the browser sends the cookie automatically.
+# Routes marked with cookieAuth require a valid, non-expired JWT.
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+
+  # -------------------------------------------------------------------------
+  # Reusable schemas
+  # -------------------------------------------------------------------------
+  schemas:
+
+    # --- Auth ---------------------------------------------------------------
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          format: password
+          example: secret123
+
+    AuthUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        email:
+          type: string
+          example: alice@example.com
+
+    # --- Seat ---------------------------------------------------------------
+    SeatStatus:
+      type: string
+      enum: [AVAILABLE, RESERVED]
+
+    Seat:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: Seat A
+        status:
+          $ref: '#/components/schemas/SeatStatus'
+
+    # --- Reservation --------------------------------------------------------
+    ReservationStatus:
+      type: string
+      enum: [PENDING_PAYMENT, CONFIRMED, EXPIRED]
+
+    Reservation:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 42
+        userId:
+          type: integer
+          example: 1
+        seatId:
+          type: integer
+          example: 2
+        status:
+          $ref: '#/components/schemas/ReservationStatus'
+        paymentAttemptCount:
+          type: integer
+          example: 0
+        expiresAt:
+          type: string
+          format: date-time
+          example: '2026-06-22T10:10:00Z'
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-06-22T10:00:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          example: '2026-06-22T10:00:00Z'
+
+    CreateReservationRequest:
+      type: object
+      required: [seatId]
+      properties:
+        seatId:
+          type: integer
+          example: 2
+
+    # --- Payment ------------------------------------------------------------
+    PaymentStatus:
+      type: string
+      enum: [PENDING, SUCCESS, FAILED]
+
+    Payment:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 7
+        reservationId:
+          type: integer
+          example: 42
+        idempotencyKey:
+          type: string
+          format: uuid
+          description: |
+            Server-generated UUID assigned to this payment attempt.
+            The client should send this key as the `Idempotency-Key` header
+            when retrying the exact same request to receive the cached result
+            without re-processing. To make a NEW payment attempt (retry after
+            failure), omit the header or provide a new UUID — the server will
+            treat it as a fresh attempt and increment payment_attempt_count.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        attemptNumber:
+          type: integer
+          description: Mirrors reservation.paymentAttemptCount at the time of this attempt.
+          example: 1
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-06-22T10:01:00Z'
+
+    # --- Errors -------------------------------------------------------------
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: Seat is not available
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+
+  # ==========================================================================
+  # Auth
+  # ==========================================================================
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Login with email and password
+      description: |
+        Validates credentials against seeded users. On success, sets an HttpOnly
+        cookie named `token` containing a signed JWT with 90-day expiry.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          headers:
+            Set-Cookie:
+              description: |
+                HttpOnly JWT cookie.
+                Format: `token=<jwt>; HttpOnly; SameSite=Strict; Path=/; Max-Age=7776000`
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/AuthUser'
+        '400':
+          description: Missing or malformed request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: email and password are required
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Invalid email or password
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Logout — clear the JWT cookie
+      description: |
+        Clears the `token` cookie by setting Max-Age=0. The JWT itself is not
+        revoked server-side (stateless). The user is effectively logged out in
+        the browser.
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Logged out
+          headers:
+            Set-Cookie:
+              description: Cookie cleared (Max-Age=0)
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: logged out
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Unauthorized
+
+  # ==========================================================================
+  # Seats
+  # ==========================================================================
+  /seats:
+    get:
+      operationId: listSeats
+      tags: [seats]
+      summary: List all seats with current availability
+      description: |
+        Returns all 3 seats and their current status.
+
+        **Lazy expiry:** Before returning seat data, the server checks for any
+        PENDING_PAYMENT reservations whose `expires_at` has passed and transitions
+        them to EXPIRED, releasing the seat to AVAILABLE — all within the same
+        DB transaction. The response always reflects the post-expiry state.
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Seat list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  seats:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Seat'
+              example:
+                seats:
+                  - id: 1
+                    name: Seat A
+                    status: AVAILABLE
+                  - id: 2
+                    name: Seat B
+                    status: RESERVED
+                  - id: 3
+                    name: Seat C
+                    status: AVAILABLE
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Unauthorized
+
+  # ==========================================================================
+  # Reservations
+  # ==========================================================================
+  /reservations:
+    post:
+      operationId: createReservation
+      tags: [reservations]
+      summary: Reserve a seat
+      description: |
+        Creates a reservation for the given seat.
+
+        **Race condition safety:** The seat row is locked with `SELECT FOR UPDATE`
+        inside a transaction. If two concurrent requests target the same seat,
+        only the first succeeds; the second receives 409.
+
+        **Preconditions checked:**
+        - Seat must be AVAILABLE.
+        - The authenticated user must not already have a PENDING_PAYMENT reservation.
+
+        On success, the reservation has status `PENDING_PAYMENT` and `expires_at`
+        set to 10 minutes from now.
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReservationRequest'
+      responses:
+        '201':
+          description: Reservation created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservation:
+                    $ref: '#/components/schemas/Reservation'
+        '400':
+          description: User already has a pending reservation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: You already have a pending reservation
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Unauthorized
+        '409':
+          description: Seat is not available (taken or race condition)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Seat is not available
+
+  /reservations/{id}:
+    get:
+      operationId: getReservation
+      tags: [reservations]
+      summary: Get a reservation by ID
+      description: |
+        Returns a single reservation. Only the owner of the reservation may
+        fetch it (userId must match the authenticated user).
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 42
+      responses:
+        '200':
+          description: Reservation found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservation:
+                    $ref: '#/components/schemas/Reservation'
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Unauthorized
+        '403':
+          description: Reservation belongs to a different user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Forbidden
+        '404':
+          description: Reservation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Reservation not found
+
+  # ==========================================================================
+  # Payments
+  # ==========================================================================
+  /payments/{reservationId}:
+    post:
+      operationId: processPayment
+      tags: [payments]
+      summary: Process payment for a reservation
+      description: |
+        Processes a mock payment attempt for the given reservation.
+
+        **Fail-first behaviour (intentional for demo):**
+        - Attempt 1 (`paymentAttemptCount === 0 → 1`): always returns FAILED.
+        - Attempt 2+ (`paymentAttemptCount >= 1`): always returns SUCCESS and
+          transitions the reservation to CONFIRMED.
+
+        **Idempotency:**
+        The server assigns a UUID `idempotencyKey` to every new payment attempt
+        and returns it in the response.
+        - To **retry** after a failure (make a new attempt): POST without the
+          `Idempotency-Key` header — the server creates a new payment record and
+          increments `paymentAttemptCount`.
+        - To **replay** the exact same request safely (e.g. network timeout, unsure
+          if first request landed): POST with `Idempotency-Key: <key from previous
+          response>` — the server returns the cached result without re-processing.
+
+        **Preconditions:**
+        - Reservation must be `PENDING_PAYMENT`.
+        - Reservation must not be expired (`expires_at > now`).
+        - Reservation must belong to the authenticated user.
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: reservationId
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 42
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Optional. Provide the key from a previous response to replay that
+            exact attempt. Omit to initiate a new payment attempt.
+          example: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        '200':
+          description: Payment attempt processed (may be SUCCESS or FAILED)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payment:
+                    $ref: '#/components/schemas/Payment'
+                  reservation:
+                    $ref: '#/components/schemas/Reservation'
+              examples:
+                first_attempt_failed:
+                  summary: Attempt 1 — always fails
+                  value:
+                    payment:
+                      id: 7
+                      reservationId: 42
+                      idempotencyKey: 550e8400-e29b-41d4-a716-446655440000
+                      attemptNumber: 1
+                      status: FAILED
+                      createdAt: '2026-06-22T10:01:00Z'
+                    reservation:
+                      id: 42
+                      userId: 1
+                      seatId: 2
+                      status: PENDING_PAYMENT
+                      paymentAttemptCount: 1
+                      expiresAt: '2026-06-22T10:10:00Z'
+                      createdAt: '2026-06-22T10:00:00Z'
+                      updatedAt: '2026-06-22T10:01:00Z'
+                retry_success:
+                  summary: Attempt 2 (retry) — succeeds
+                  value:
+                    payment:
+                      id: 8
+                      reservationId: 42
+                      idempotencyKey: 660e8400-e29b-41d4-a716-446655440001
+                      attemptNumber: 2
+                      status: SUCCESS
+                      createdAt: '2026-06-22T10:02:00Z'
+                    reservation:
+                      id: 42
+                      userId: 1
+                      seatId: 2
+                      status: CONFIRMED
+                      paymentAttemptCount: 2
+                      expiresAt: '2026-06-22T10:10:00Z'
+                      createdAt: '2026-06-22T10:00:00Z'
+                      updatedAt: '2026-06-22T10:02:00Z'
+        '400':
+          description: Reservation is expired or already confirmed/expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                expired:
+                  value:
+                    error: Reservation has expired
+                already_confirmed:
+                  value:
+                    error: Reservation is already confirmed
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Unauthorized
+        '403':
+          description: Reservation belongs to a different user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Forbidden
+        '404':
+          description: Reservation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Reservation not found
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+tags:
+  - name: auth
+    description: Login and logout
+  - name: seats
+    description: Seat availability
+  - name: reservations
+    description: Seat reservation lifecycle
+  - name: payments
+    description: Mock payment processing with idempotency
