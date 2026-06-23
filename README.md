@@ -97,3 +97,13 @@ Seeded users simplify the demo. In production: self-registration, email verifica
 
 ### Confirmed reservation cancellation
 Not implemented. Future work: release seat to `AVAILABLE`, handle refund logic, add `CANCELLED` terminal state to the reservation state machine.
+
+## Scenario
+
+1. **Log in** — use any seeded account (e.g. `alice@test.com / password123`)
+2. **Browse seats** — the seat grid shows real-time availability; expired reservations are cleaned up automatically on each page load
+3. **Reserve a seat** — click an available seat; it transitions to `RESERVED` and you land on the payment page with a 10-minute countdown
+4. **First payment attempt** — always fails (by design); status remains `PENDING_PAYMENT`
+5. **Retry payment** — succeeds; reservation moves to `CONFIRMED`
+6. **Idempotency** — clicking "Pay" again with the same server-generated key returns the cached result without re-processing
+7. **Expiry** — if the 10-minute TTL elapses before payment, the reservation becomes `EXPIRED` and the seat returns to `AVAILABLE` on the next seat fetch
